@@ -56,7 +56,11 @@ dataset_subdir_l = [
     # 'EnvConveyor2D-RobotPlanarDisk',
     # 'EnvDropRegion2D-RobotPlanarDisk',
     # 'EnvHighways2D-RobotPlanarDisk',
-    'EnvEmptyNoWait2D-RobotPlanarDisk',
+    # 'EnvEmptyNoWait2D-RobotPlanarDisk',
+    # 'EnvConveyor2DNS-RobotPlanarDisk',
+    'EnvDropRegion2DNS-RobotPlanarDisk',
+    # 'EnvShelf2DNS-RobotPlanarDisk',
+    # 'EnvRoomMap2DNS-RobotPlanarDisk',
 ]
 
 include_velocity_l = [
@@ -92,7 +96,7 @@ lr = 3e-4
 
 
 wandb_options = dict(
-    wandb_mode='online',  # "online", "offline" or "disabled"
+    wandb_mode='disabled',  # "online", "offline" or "disabled"
     wandb_entity='wandb_username',  # "username"
     wandb_project=exp_name
 )

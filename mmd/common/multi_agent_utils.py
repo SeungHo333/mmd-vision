@@ -60,7 +60,7 @@ def is_multi_agent_start_goal_states_valid(reference_robot,
         for i in range(len(start_state_pos_l)):
             for j in range(i + 1, len(goal_state_pos_l)):
                 # Start-start.
-                if torch.norm(start_state_pos_l[i] - start_state_pos_l[j]) < 0.15:
+                if torch.norm(start_state_pos_l[i] - start_state_pos_l[j]) < 0.1: # originally 0.15
                     print('Start-start failed with i:', i, 'j:', j, " distance:",
                           torch.norm(start_state_pos_l[i] - start_state_pos_l[j]))
                     return False

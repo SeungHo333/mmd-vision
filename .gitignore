@@ -29,3 +29,5 @@ wheels/
 data_trained_models/
 data_trajectories/
 scripts/inference/results/
+results/
+logs/

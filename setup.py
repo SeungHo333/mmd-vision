@@ -15,7 +15,7 @@ with open(path.join(here, 'requirements.txt'), encoding='utf-8') as f:
         requires_list.append(str(line))
 
 
-setup(name='mmd',
+setup(name='mmd-vision',
       version=__version__,
       description='Multi-Robot Motion Planning with Diffusion Models',
       author='Yorai Shaoul',

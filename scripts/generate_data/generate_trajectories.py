@@ -30,6 +30,7 @@ from mmd.common.trajectory_utils import densify_trajs
 def generate_collision_free_trajectories(
     env_id,
     robot_id,
+    seed,
     num_trajectories_per_context,
     results_dir,
     threshold_start_goal_pos=0.5,
@@ -60,147 +61,135 @@ def generate_collision_free_trajectories(
         obstacle_cutoff_margin=obstacle_cutoff_margin,
         tensor_args=tensor_args
     )
+    max_retries = 10
+    for retry in range(max_retries):
+        # -------------------------------- Start, Goal states ---------------------------------
+        start_state_pos, goal_state_pos = None, None
+        pair = env.start_goal_generator()
+        start_state_pos = pair[0][0]  # Shape (robot.q_dim,)
+        goal_state_pos = pair[0][1]  # Shape (robot.q_dim,)
 
-    # -------------------------------- Start, Goal states ---------------------------------
-    start_state_pos, goal_state_pos = None, None
-    for _ in range(n_tries):
-        q_free = task.random_coll_free_q(n_samples=2)
-        start_state_pos = q_free[0]
-        goal_state_pos = q_free[1]
+        if start_state_pos is None or goal_state_pos is None:
+            raise ValueError(f"No collision free configuration was found\n"
+                            f"start_state_pos: {start_state_pos}\n"
+                            f"goal_state_pos:  {goal_state_pos}\n")
 
-        # Ask the environment if this start and goal are valid for data generation.
-        if not env.is_start_goal_valid_for_data_gen(robot, start_state_pos, goal_state_pos):
-            print(f"Invalid start and goal for data generation: {start_state_pos}, {goal_state_pos}")
-            continue
+        n_trajectories = num_trajectories_per_context
 
-        if is_start_goal_near_limits:
-            dim = torch.randint(0, robot.q_dim, (1,)).item()
-            random_number = torch.rand(1, **tensor_args)
-            dim_range = robot.q_max[dim] - robot.q_min[dim]
-            if random_number < 1/robot.q_dim:
-                start_state_pos[dim] = robot.q_min[dim] + dim_range * 0.1
-            else:
-                start_state_pos[dim] = robot.q_max[dim] - dim_range * 0.1
-            if random_number < 1/robot.q_dim:
-                goal_state_pos[dim] = robot.q_max[dim] - dim_range * 0.1
-            else:
-                goal_state_pos[dim] = robot.q_min[dim] + dim_range * 0.1
+        # Get the skill sequence conditioned on the start and goal.
+        skill_pos_sequence_l = env.get_skill_pos_seq_l(robot, start_pos=start_state_pos, goal_pos=goal_state_pos)
 
-        if torch.linalg.norm(start_state_pos - goal_state_pos) > threshold_start_goal_pos:
+        # -------------------------------- Hybrid Planner ---------------------------------
+        # Sample-based planner
+        rrt_connect_default_params_env = env.get_rrt_connect_params(robot=robot)
+        rrt_connect_default_params_env['max_time'] = rrt_max_time
+
+        # Two options here. Either ask for an RRT-Conect path from random start to goal. Or ask for RRT-Connect path from
+        # start to beginning of skill sequence, and then from end of skill sequence to goal.
+        # This is to ensure that the skill is included as-is.
+        pre_optimization_planners = []  # Their solutions will be concatenated.
+        if not skill_pos_sequence_l:
+            rrt_connect_params = dict(
+                **rrt_connect_default_params_env,
+                task=task,
+                start_state_pos=start_state_pos,
+                goal_state_pos=goal_state_pos,
+                tensor_args=tensor_args,
+            )
+            sample_based_planner_base = RRTConnect(**rrt_connect_params)
+            sample_based_planner = MultiSampleBasedPlanner(
+                sample_based_planner_base,
+                n_trajectories=n_trajectories,
+                max_processes=-1,
+                optimize_sequentially=True
+            )
+            pre_optimization_planners = [sample_based_planner]
+        else:
+            # Choose random skill index to choose. There may be multiple demonstrations of a skill so choose one.
+            rand_ix_skill = torch.randint(0, len(skill_pos_sequence_l), (1,)).item()
+            rrt_start_to_skill = RRTStar(
+                **rrt_connect_default_params_env,
+                task=task,
+                start_state_pos=start_state_pos,
+                goal_state_pos=skill_pos_sequence_l[rand_ix_skill][0],
+                tensor_args=tensor_args,
+            )
+            skill = IdentityPlanner(skill_pos_sequence_l[rand_ix_skill], tensor_args=tensor_args)
+            rrt_skill_to_goal = RRTStar(
+                **rrt_connect_default_params_env,
+                task=task,
+                start_state_pos=skill_pos_sequence_l[rand_ix_skill][-1],
+                goal_state_pos=goal_state_pos,
+                tensor_args=tensor_args,
+            )
+            planner_start_to_skill = MultiSampleBasedPlanner(
+                rrt_start_to_skill,
+                n_trajectories=n_trajectories,
+                max_processes=-1,
+                optimize_sequentially=True
+            )
+            planner_skill = MultiSampleBasedPlanner(
+                skill,
+                n_trajectories=n_trajectories,
+                max_processes=-1,
+                optimize_sequentially=True
+            )
+            planner_skill_to_goal = MultiSampleBasedPlanner(
+                rrt_skill_to_goal,
+                n_trajectories=n_trajectories,
+                max_processes=-1,
+                optimize_sequentially=True
+            )
+            pre_optimization_planners = [planner_start_to_skill, planner_skill, planner_skill_to_goal]
+
+        # Optimization-based planner
+        gpmp_default_params_env = env.get_gpmp2_params(robot=robot)
+        gpmp_default_params_env['opt_iters'] = gpmp_opt_iters
+        gpmp_default_params_env['n_support_points'] = n_support_points
+        gpmp_default_params_env['dt'] = duration / n_support_points
+
+        planner_params = dict(
+            **gpmp_default_params_env,
+            robot=robot,
+            n_dof=robot.q_dim,
+            num_particles_per_goal=n_trajectories,
+            start_state=start_state_pos,
+            multi_goal_states=goal_state_pos.unsqueeze(0),  # add batch dim for interface,
+            collision_fields=task.get_collision_fields(),
+            tensor_args=tensor_args,
+        )
+        opt_based_planner = GPMP2(**planner_params)
+
+        ###############
+        # Hybrid planner
+        planner = HybridPlanner(
+            pre_optimization_planners,
+            opt_based_planner,
+            tensor_args=tensor_args
+        )
+
+        # Optimize
+        trajs_iters = planner.optimize(debug=debug, print_times=True, return_iterations=True)
+        trajs_last_iter = trajs_iters[-1]
+
+        trajs_last_iter_coll, trajs_last_iter_free = task.get_trajs_collision_and_free(trajs_last_iter)
+
+        if trajs_last_iter_free is not None and len(trajs_last_iter_free) > 0:
+            # Success! Found a free trajectory. Break the retry loop.
+            print(f"Successfully generated collision-free trajectories on try {retry + 1}.")
             break
-
-    if start_state_pos is None or goal_state_pos is None:
-        raise ValueError(f"No collision free configuration was found\n"
-                         f"start_state_pos: {start_state_pos}\n"
-                         f"goal_state_pos:  {goal_state_pos}\n")
-
-    n_trajectories = num_trajectories_per_context
-
-    # Get the skill sequence conditioned on the start and goal.
-    skill_pos_sequence_l = env.get_skill_pos_seq_l(robot, start_pos=start_state_pos, goal_pos=goal_state_pos)
-
-    # -------------------------------- Hybrid Planner ---------------------------------
-    # Sample-based planner
-    rrt_connect_default_params_env = env.get_rrt_connect_params(robot=robot)
-    rrt_connect_default_params_env['max_time'] = rrt_max_time
-
-    # Two options here. Either ask for an RRT-Conect path from random start to goal. Or ask for RRT-Connect path from
-    # start to beginning of skill sequence, and then from end of skill sequence to goal.
-    # This is to ensure that the skill is included as-is.
-    pre_optimization_planners = []  # Their solutions will be concatenated.
-    if not skill_pos_sequence_l:
-        rrt_connect_params = dict(
-            **rrt_connect_default_params_env,
-            task=task,
-            start_state_pos=start_state_pos,
-            goal_state_pos=goal_state_pos,
-            tensor_args=tensor_args,
-        )
-        sample_based_planner_base = RRTConnect(**rrt_connect_params)
-        sample_based_planner = MultiSampleBasedPlanner(
-            sample_based_planner_base,
-            n_trajectories=n_trajectories,
-            max_processes=-1,
-            optimize_sequentially=True
-        )
-        pre_optimization_planners = [sample_based_planner]
-    else:
-        # Choose random skill index to choose. There may be multiple demonstrations of a skill so choose one.
-        rand_ix_skill = torch.randint(0, len(skill_pos_sequence_l), (1,)).item()
-        rrt_start_to_skill = RRTStar(
-            **rrt_connect_default_params_env,
-            task=task,
-            start_state_pos=start_state_pos,
-            goal_state_pos=skill_pos_sequence_l[rand_ix_skill][0],
-            tensor_args=tensor_args,
-        )
-        skill = IdentityPlanner(skill_pos_sequence_l[rand_ix_skill], tensor_args=tensor_args)
-        rrt_skill_to_goal = RRTStar(
-            **rrt_connect_default_params_env,
-            task=task,
-            start_state_pos=skill_pos_sequence_l[rand_ix_skill][-1],
-            goal_state_pos=goal_state_pos,
-            tensor_args=tensor_args,
-        )
-        planner_start_to_skill = MultiSampleBasedPlanner(
-            rrt_start_to_skill,
-            n_trajectories=n_trajectories,
-            max_processes=-1,
-            optimize_sequentially=True
-        )
-        planner_skill = MultiSampleBasedPlanner(
-            skill,
-            n_trajectories=n_trajectories,
-            max_processes=-1,
-            optimize_sequentially=True
-        )
-        planner_skill_to_goal = MultiSampleBasedPlanner(
-            rrt_skill_to_goal,
-            n_trajectories=n_trajectories,
-            max_processes=-1,
-            optimize_sequentially=True
-        )
-        pre_optimization_planners = [planner_start_to_skill, planner_skill, planner_skill_to_goal]
-
-    # Optimization-based planner
-    gpmp_default_params_env = env.get_gpmp2_params(robot=robot)
-    gpmp_default_params_env['opt_iters'] = gpmp_opt_iters
-    gpmp_default_params_env['n_support_points'] = n_support_points
-    gpmp_default_params_env['dt'] = duration / n_support_points
-
-    planner_params = dict(
-        **gpmp_default_params_env,
-        robot=robot,
-        n_dof=robot.q_dim,
-        num_particles_per_goal=n_trajectories,
-        start_state=start_state_pos,
-        multi_goal_states=goal_state_pos.unsqueeze(0),  # add batch dim for interface,
-        collision_fields=task.get_collision_fields(),
-        tensor_args=tensor_args,
-    )
-    opt_based_planner = GPMP2(**planner_params)
-
-    ###############
-    # Hybrid planner
-    planner = HybridPlanner(
-        pre_optimization_planners,
-        opt_based_planner,
-        tensor_args=tensor_args
-    )
-
-    # Optimize
-    trajs_iters = planner.optimize(debug=debug, print_times=True, return_iterations=True)
-    trajs_last_iter = trajs_iters[-1]
+        else:
+            print(f"Retry {retry + 1}/{max_retries} failed to generate collision-free trajectories. Retrying...")
 
     # -------------------------------- Save trajectories ---------------------------------
     print(f'----------------STATISTICS----------------')
     print(f'percentage free trajs: {task.compute_fraction_free_trajs(trajs_last_iter)*100:.2f}')
     print(f'percentage collision intensity {task.compute_collision_intensity_trajs(trajs_last_iter)*100:.2f}')
     print(f'success {task.compute_success_free_trajs(trajs_last_iter)}')
+    print(f'seed: {seed}')
 
     # save
     torch.cuda.empty_cache()
-    trajs_last_iter_coll, trajs_last_iter_free = task.get_trajs_collision_and_free(trajs_last_iter)
     if trajs_last_iter_coll is None:
         trajs_last_iter_coll = torch.empty(0)
     torch.save(trajs_last_iter_coll, os.path.join(results_dir, f'trajs-collision.pt'))
@@ -706,8 +695,12 @@ def experiment(
     # env_id: str = 'EnvEmptyNoWait2D',
     # env_id: str = 'EnvEmpty2D',
     # env_id: str = 'EnvDropRegion2D',
-    env_id: str = 'EnvHighways2D',
+    # env_id: str = 'EnvHighways2D',
     # env_id: str = 'EnvConveyor2D',
+    env_id: str = 'EnvDropRegion2DNS',
+    # env_id: str = 'EnvConveyor2DNS',
+    # env_id: str = 'EnvRoomMap2DNS',
+    # env_id: str = 'EnvShelf2DNS',
 
     robot_id: str = 'RobotPlanarDisk',
 
@@ -761,6 +754,7 @@ def experiment(
     num_trajectories_coll, num_trajectories_free = generate_collision_free_trajectories(
         env_id,
         robot_id,
+        seed,
         num_trajectories,
         results_dir,
         threshold_start_goal_pos=threshold_start_goal_pos,

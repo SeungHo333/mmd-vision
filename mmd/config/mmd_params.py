@@ -27,7 +27,7 @@ import torch
 # A central location for aggregating the parameters used across files.
 class MMDParams:
     # Robot parameters.
-    robot_planar_disk_radius = 0.05
+    robot_planar_disk_radius = 0.025 # originally 0.05
     # Single-agent planning parameters.
     use_guide_on_extra_objects_only = False
     n_samples = 64  # Batch size. Number of trajectories generated together.

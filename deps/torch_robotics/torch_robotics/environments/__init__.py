@@ -13,3 +13,7 @@ from .env_highways_2d import *
 from .env_highways_2d_extra_objects import *
 from .env_empty_nowait_2d import *
 from .env_empty_nowait_2d_extra_objects import *
+from .env_drop_region_2d_no_skill import *
+from .env_conveyor_2d_no_skill import *
+from .env_shelf_2d_no_skill import *
+from .env_roommap_2d_no_skill import *

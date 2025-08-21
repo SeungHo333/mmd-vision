@@ -59,8 +59,7 @@ from mmd.common.experiences import PathExperience, PathBatchExperience
 from mmd.common.constraints import MultiPointConstraint
 from mmd.common.pretty_print import *
 
-TRAINED_MODELS_DIR = '../../data_trained_models/'
-
+TRAINED_MODELS_DIR = './data_trained_models/'
 
 class MPDEnsemble(SingleAgentPlanner):
     """

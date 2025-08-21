@@ -12,10 +12,14 @@ from experiment_launcher.utils import is_local
 # num_contexts: the number of start/goal pairs.
 # num_trajectories_per_context: the number of trajectories per start/goal pair.
 
-env_id: str = 'EnvHighways2D'
+# env_id: str = 'EnvHighways2D'
+env_id: str = 'EnvDropRegion2DNS'
+# env_id: str = 'EnvConveyor2DNS'
+# env_id: str = 'EnvRoomMap2DNS'
+# env_id: str = 'EnvShelf2DNS'
 robot_id: str = 'RobotPlanarDisk'
-num_contexts = 500
-num_trajectories_per_context = 20
+num_contexts = 2000
+num_trajectories_per_context = 5
 threshold_start_goal_pos: float = 0.9
 is_start_goal_near_limits: bool = False
 obstacle_cutoff_margin: float = 0.05
