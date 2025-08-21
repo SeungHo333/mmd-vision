@@ -1,4 +1,4 @@
-import collections
+import collections.abc
 import random
 from typing import List
 
@@ -19,7 +19,7 @@ def get_torch_device(device='cuda'):
 DEFAULT_TENSOR_ARGS = {'device': get_torch_device('cuda'), 'dtype': torch.float32}
 
 def dict_to_device(ob, device):
-    if isinstance(ob, collections.Mapping):
+    if isinstance(ob, collections.abc.Mapping):
         return {k: dict_to_device(v, device) for k, v in ob.items()}
     else:
         return ob.to(device)
